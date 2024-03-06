@@ -106,7 +106,8 @@ describe 'database' do
   it 'checks persistence' do
     num_users = 13
     script1 = (1..num_users).map do |i|
-      "insert #{i} user#{i} user#{i}@example.com"
+      num = i * 2
+      "insert #{num} user#{num} user#{num}@example.com"
     end
     script1 << ".exit"
 
@@ -124,9 +125,10 @@ describe 'database' do
     ]
     result2 = run_script(script2, false)
 
-    expected2 = ["(sqlite)> (1, user1, user1@example.com)"]
+    expected2 = ["(sqlite)> (2, user2, user2@example.com)"]
     (2..num_users).map do |i|
-      expected2 << "(#{i}, user#{i}, user#{i}@example.com)"
+      num = i * 2
+      expected2 << "(#{num}, user#{num}, user#{num}@example.com)"
     end
     expected2 << "(sqlite)> "
     expect(result2).to match_array(expected2)

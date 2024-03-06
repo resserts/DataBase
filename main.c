@@ -43,8 +43,8 @@ typedef struct{
     char email[EMAIL_MAX + 1];      //256 bytes
 }Row;
 
-const u_int32_t USERNAME_OFFSET = 4;
-const u_int32_t EMAIL_OFFSET = 37;
+const u_int32_t USERNAME_OFFSET = sizeof(u_int32_t);
+const u_int32_t EMAIL_OFFSET = USERNAME_OFFSET + 33;
 const u_int32_t ROW_OFFSET = 296;
 
 const u_int32_t PAGE_SIZE = 4096;
@@ -76,12 +76,12 @@ const u_int32_t LEAF_NODE_MAX_CELLS = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL
 //internal node layout
 const u_int32_t INTERNAL_NODE_NUM_KEYS_SIZE = sizeof(u_int32_t);
 const u_int32_t INTERNAL_NODE_NUM_KEYS_OFFSET = COMMON_NODE_HEADER_SIZE;
-const u_int32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(u_int32_t);
+const u_int32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(void*);
 const u_int32_t INTERNAL_NODE_RIGHT_CHILD_OFFSET = INTERNAL_NODE_NUM_KEYS_OFFSET + INTERNAL_NODE_NUM_KEYS_SIZE;
 const u_int32_t INTERNAL_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + INTERNAL_NODE_NUM_KEYS_SIZE + INTERNAL_NODE_RIGHT_CHILD_SIZE;
 //internal node body layout
 const u_int32_t INTERNAL_NODE_KEY_SIZE = sizeof(u_int32_t);
-const u_int32_t INTERNAL_NODE_CHILD_SIZE = sizeof(u_int32_t);
+const u_int32_t INTERNAL_NODE_CHILD_SIZE = sizeof(void*);
 const u_int32_t INTERNAL_NODE_CELL_SIZE = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
 
 typedef struct
@@ -130,7 +130,7 @@ void* leaf_node_value(void* node, u_int32_t cell_num) {
 }
 
 NodeType node_type(void *node){
-    return *(NodeType*)(node + NODE_TYPE_OFFSET);
+    return *(u_int8_t*)(node + NODE_TYPE_OFFSET);
 }
 void set_node_type(void *node, NodeType type){
     u_int8_t value = type;
@@ -147,12 +147,14 @@ void set_is_root(void *node, bool value){
 void initialize_leaf_node(void* node) { 
     *leaf_node_num_cells(node) = 0; 
     set_node_type(node, NODE_LEAF);
+    set_is_root(node, false);
 }
 
 u_int32_t *internal_num_keys(void *node){
     if(node_type(node) == NODE_INTERNAL){
         return (node + INTERNAL_NODE_NUM_KEYS_OFFSET);
     }else{
+        printf("ERROR: passed leaf node as internal");
         return ERROR;
     }
 }
@@ -166,16 +168,18 @@ u_int32_t* internal_cell_key(void *node, u_int32_t key_pos){
     return (node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * key_pos));
 }
 
-void *internal_child(void *node, u_int32_t child_pos){
-    return  *(void**)(node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * child_pos) + INTERNAL_NODE_KEY_SIZE);
+void **internal_child(void *node, u_int32_t child_pos){
+    return (node + INTERNAL_NODE_RIGHT_CHILD_OFFSET + (INTERNAL_NODE_CELL_SIZE * child_pos));
 }
 void internal_add_child(void *node, u_int32_t key,void *child){
 
-    u_int32_t num_keys = *internal_num_keys(node);
+    u_int32_t *num_keys = internal_num_keys(node);
     if(num_keys){
-        *(u_int32_t*)(node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * (num_keys - 1))) = key;
-        *(void**)(node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * (num_keys - 1)) + INTERNAL_NODE_KEY_SIZE) = child;
-        internal_set_num_keys(node, num_keys + 1);
+        *(u_int32_t*)(node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * (*num_keys))) = key;
+        *(void**)(node + INTERNAL_NODE_HEADER_SIZE + (INTERNAL_NODE_CELL_SIZE * (*num_keys)) + INTERNAL_NODE_KEY_SIZE) = child;
+        internal_set_num_keys(node, *num_keys + 1);
+    }else{
+        printf("pointer is bad.\n");
     }
 }
 
@@ -188,19 +192,19 @@ void initialize_internal_node(void *node){
 void* create_new_root(Table* table, void *right_child){
     void *left_child = add_page(table->pager);
     void *root = table->pager->pages[table->root_page_num];
-    printf("ok\n");
     memcpy(left_child, root, PAGE_SIZE);
     *(u_int8_t*)(left_child + IS_ROOT_OFFSET) = false;
     set_node_type(left_child, NODE_LEAF);
 
-    printf("hmmm\n");
     set_node_type(root, NODE_INTERNAL);    
-    *(void**)(root + INTERNAL_NODE_RIGHT_CHILD_OFFSET) = right_child;
-    printf("nossa\n");
-    u_int32_t right_child_biggest_key = *leaf_node_key(right_child, *leaf_node_num_cells(right_child) - 1);
-    internal_add_child(root, right_child_biggest_key, left_child);
+    internal_set_num_keys(root, 0);
+    memcpy((root + INTERNAL_NODE_RIGHT_CHILD_OFFSET), &left_child, sizeof(void*));
+    u_int32_t *left_child_biggest_key = leaf_node_key(left_child, *leaf_node_num_cells(left_child) - 1);
+    if(left_child_biggest_key == ERROR){
+        printf("Error:couldn't get key\n");
+    }
+    internal_add_child(root, *left_child_biggest_key, right_child);
 
-    printf("ué\n");
     return root;
 }
 
@@ -420,14 +424,19 @@ void *split_leaf_node(Cursor *cursor, void *node1){
     u_int32_t node2_copied_cells = floor(*node1_num_cells/2);
 
     cursor->page_num = cursor->table->pager->number_of_pages - 1;
-    for(int i = 0; i < node2_copied_cells; i++){
-        u_int32_t cell_to_copy = *node1_num_cells - node2_copied_cells + i;
+    printf("page_num = %i\n", cursor->page_num);
+    while(*node1_num_cells - 1 > node2_copied_cells){
+        u_int32_t cell_to_copy = *node1_num_cells - 1;
         leaf_node_insert(cursor, *leaf_node_key(node1, cell_to_copy), leaf_node_value(node1, cell_to_copy));
-        memcpy(leaf_node_cell(node1, cell_to_copy), leaf_node_cell(node2, cell_to_copy), LEAF_NODE_CELL_SIZE);
+        memcpy(leaf_node_cell(node1, cell_to_copy), leaf_node_cell(node2, 12), LEAF_NODE_CELL_SIZE);
+        *leaf_node_num_cells(node1) = cell_to_copy;
     }
 
     if(is_root(node1)){
         return create_new_root(cursor->table, node2);
+    }else if(!is_root(node1)){
+        printf("didn't implement this yet\n");
+        return ERROR;
     }
 
 }
@@ -436,28 +445,40 @@ int leaf_node_insert(Cursor *cursor, u_int32_t key, Row *value){
     void *node = cursor->table->pager->pages[cursor->page_num];
     u_int32_t num_cells = *leaf_node_num_cells(node);
 
-    if(num_cells >= LEAF_NODE_MAX_CELLS){
-        void* root = split_leaf_node(cursor, node);
-        u_int32_t root_num_keys = *internal_num_keys(root);
-        u_int32_t root_key = *internal_cell_key(root, root_num_keys - 1);
-        if(root_key < key){
-            node = internal_child(root, root_num_keys - 1);
-        }
-        num_cells = *leaf_node_num_cells(node);
-    }
     
-    //sorting
     int cell =  leaf_node_find_cell(node, key);
     if (cell == -1){
         return ERROR;
     }
     cursor->cell_num = cell;    
-    //sorting
+    
+    if(num_cells >= LEAF_NODE_MAX_CELLS){
+        void* root = split_leaf_node(cursor, node);
+        u_int32_t *root_num_keys = internal_num_keys(root);
+        if(root_num_keys == NULL){
+            printf("Error: Root doesn't have keys.\n");
+        }
+        u_int32_t root_key = *internal_cell_key(root, *root_num_keys - 1);
+        if(root_key < key){
+            node = *internal_child(root, *root_num_keys);
+        }else{
+            node = *internal_child(root, *root_num_keys - 1);
+        }
 
+        if(node == NULL){
+            printf("node is null\n");
+        }
+
+        num_cells = *leaf_node_num_cells(node);
+        printf("num_cells: %i\n", num_cells);
+        
+        int cell =  leaf_node_find_cell(node, key);
+        cursor->cell_num = cell;    
+        printf("cell: %i\n");
+    }
     
     if(cursor->cell_num < num_cells){
         for(int i = num_cells; i > cursor->cell_num; i--){
-            printf("num_cells: %i\n", num_cells);
             memcpy(leaf_node_cell(node, i), leaf_node_cell(node, i - 1), LEAF_NODE_CELL_SIZE);
         }
     }
@@ -512,12 +533,14 @@ int insert(Statement *statement, Cursor *cursor){
 int print(Statement *statement, Table *table){
     for(int i = 0; i < table->pager->number_of_pages; i++){
         void *node = table->pager->pages[i];
-        for(int j = 0; j < LEAF_NODE_MAX_CELLS && j < *(int*)(table->pager->pages[i] + LEAF_NODE_NUM_CELLS_OFFSET); j++){
-            void *value = leaf_node_value(node, j);
-            
-            printf("(%i, %s, %s)\n", *(int*)value, 
-                                    (char*)(value + USERNAME_OFFSET), 
-                                    (char*)(value + EMAIL_OFFSET));
+        if(node_type(node) == NODE_LEAF){
+            for(int j = 0; j < LEAF_NODE_MAX_CELLS && j < *(int*)leaf_node_num_cells(node); j++){
+                void *value = leaf_node_value(node, j);
+                    
+                printf("(%u, %s, %s)\n", *(unsigned int*)value, 
+                                        (char*)(value + USERNAME_OFFSET), 
+                                        (char*)(value + EMAIL_OFFSET));
+            }
         }
     }
 }
